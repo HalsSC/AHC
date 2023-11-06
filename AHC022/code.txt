@@ -1,0 +1,253 @@
+# score_sum:36798554(seed=0~99)
+# seed=0でplace:3747008 measure:2992500, wrong:66
+# 中心から放射状に温度を配置(+jしてちょっとずらす)
+# points = [(0, 0), (0, 0), (0, 0), (0, 0)] から外へ
+# 重複してカウントした場合、その平均を取る(尤度を求める際にはその分を加重)
+# 尤度=(誤差尤度(%)の総和) i_in,i_outごとに計算して大きい順に重複無しで採用
+# ベストとi_inごとに尤度を比較して、より大きいのがN/2以上なら入れ替え
+# 1回目をデフォルトとして、尤度が大きいi_inが19N/20個ならそこで打ち止め
+# 3.0秒でtimerをセット(だいたい実行に3.8sec)
+islocal = false
+
+function set_temp(temp_list::Vector{Vector{Int}})
+    placement_cost::Int = 0
+    l = length(temp_list)
+    for (i, row) = enumerate(temp_list)
+        println(join(row, " "))
+        for j = 1:l
+            placement_cost += (temp_list[i][j] - temp_list[mod(i, l)+1][j])^2
+            placement_cost += (temp_list[i][j] - temp_list[i][mod(j, l)+1])^2
+        end
+    end
+    flush(stdout)
+    placement_cost
+end
+function get_temp(temp_list::Vector{Vector{Int}}, i::Int, j::Int)
+    l = length(temp_list)
+    temp_list[mod(i, l)+1][mod(j, l)+1]
+end
+function measure(i::Int, y::Int, x::Int)
+    println("$i $y $x")
+    flush(stdout)
+    v = int(input())
+    if v == -1
+        println(stderr, "something went wrong. i=$i y=$y x=$x")
+        exit(1)
+    end
+    v
+end
+function measure_local(i::Int, y::Int, x::Int, temp_list::Vector{Vector{Int}}, yx::Vector{Vector{Int}}, ans::Vector{Int})
+    println("$i $y $x")
+    flush(stdout)
+    v = int(input())
+    y1, x1 = yx[ans[i+1]+1]
+    max(0, min(1000, v + get_temp(temp_list, y1, x1)))
+end
+function answer(est::Vector{Int})
+    println("-1 -1 -1")
+    ans = zeros(Int, length(est))
+    for (i, e) = enumerate(est)
+        ans[i] = e
+    end
+    println.(ans)
+    flush(stdout)
+end
+
+function normal_pdf(x, mean, std)
+    exp(-0.5 * ((x - mean) / std)^2) / (std * √(2π))
+end
+
+function ave_temp(measured_data, measured_cnt, i_in::Int, y1::Int, x1::Int, v)
+    ind = (2 + y1) * 5 + x1 + 3
+    if measured_cnt[i_in][ind] == 0
+        measured_data[i_in][ind] = v
+    else
+        measured_data[i_in][ind] += v
+    end
+    measured_cnt[i_in][ind] += 1
+end
+
+# ::Vector{Float64}ってすると何か怒られる
+function judge(best_lh_list, lh_list, placement_cost::Int, measure_cost::Int)
+    cnt = 0
+    diff_sum = 0.0
+    for (lh1, lh2) = zip(lh_list, best_lh_list)
+        diff_sum += lh1 - lh2
+        if lh1 >= lh2
+            cnt += 1
+        end
+    end
+    # debug("cnt:", cnt, " ", diff_sum)
+    cnt
+end
+
+# ----------solution----------
+function solve(l::Int, n::Int, s::Int, yx::Vector{Vector{Int}}, ans=nothing)
+    timer = Timer(3.0)
+    temp_list::Vector{Vector{Int}} = [zeros(Int, l) for _ = 1:l]
+    for i = 0:l-1, j = 0:l-1
+        temp_list[i+1][j+1] = max(0, min(1000, (l ÷ 2 - i)^2 + (l ÷ 2 - j)^2 + j))
+    end
+    placement_cost = set_temp(temp_list)
+    measure_cost = 0
+    best_est = zeros(Int, n)
+    best_lh_list = zeros(n)
+    default_est = zeros(Int, n)
+    default_lh_list = zeros(n)
+    best_correct_count, honto_best_correct, best_num = 0, 0, 0 # ローカルテスタ用
+    points::Vector{Tuple{Int,Int}} = [(0, 0), (0, 0), (0, 0)]
+    # for dy = -2:2, dx = -2:2
+    #     push!(points, (dy, dx))
+    # end
+    for _ = 1:90
+        push!(points, (rand(-2:2), rand(-2:2)))
+    end
+    sort!(points, by=x -> abs(x[1]) + abs(x[2]))
+    # measured_data::Vector{Vector{Tuple{Int,Int,Float64}}} = [[] for _ = 1:n]
+    measured_data::Vector{Vector{Float64}} = [zeros(25) for _ = 1:n]   # 2×2
+    measured_cnt::Vector{Vector{Int}} = [zeros(Int, 25) for _ = 1:n]
+    for (measure_num, (y1, x1)) = enumerate(points)
+        est = zeros(Int, n)
+        likelihoods::Vector{Tuple{Int,Int,Float64}} = []
+        isopen(timer) || break
+        for i_in = 1:n
+            # ワームホール1~Nについてy+y1,x+x1を計測
+            if islocal
+                v = measure_local(i_in - 1, y1, x1, temp_list, yx, ans)
+            else
+                v = measure(i_in - 1, y1, x1)
+            end
+            measure_cost += 100 * (10 + abs(y1) + abs(x1))
+            ave_temp(measured_data, measured_cnt, i_in, y1, x1, v)
+
+            # 出口セル1~Nについてホールi_inとの尤度(誤差尤度の二乗和の平均)を計算し直し
+            for (i_out, (y, x)) = enumerate(yx)
+                likelihood = 0.0
+                val_cnt = 0
+                for dy = -2:2, dx = -2:2
+                    ind = (2 + dy) * 5 + dx + 3
+                    value = measured_data[i_in][ind]
+                    cnt = measured_cnt[i_in][ind]
+                    cnt == 0 && continue
+                    gosa_lh = normal_pdf(get_temp(temp_list, y + dy, x + dx) - value / cnt, 0, s) * (1.0 + 0.1 * cnt)   # 誤差尤度×(1.計測回数)
+                    likelihood += gosa_lh
+                    val_cnt += 1
+                end
+                push!(likelihoods, (i_in, i_out, likelihood / val_cnt))
+            end
+            isopen(timer) || break
+        end
+        sort!(likelihoods, by=x -> x[3], rev=true)
+        # ランダムに入れ替え
+        # for _ = 1:5
+        #     a, b = rand(1:n÷2), rand(1:n÷2)
+        #     likelihoods[a], likelihoods[b] = likelihoods[b], likelihoods[a]
+        # end
+        connected_hole = falses(n)
+        connected_cell = falses(n)
+        correct_count = 0
+        lh_list = zeros(n)
+        for (i_in, i_out, likelihood) = likelihoods
+            if connected_hole[i_in] || connected_cell[i_out]
+                continue
+            end
+            est[i_in] = i_out - 1
+            if islocal
+                correct_count += est[i_in] == ans[i_in]
+            end
+            connected_hole[i_in] = true
+            connected_cell[i_out] = true
+            lh_list[i_in] = likelihood
+        end
+        if islocal && correct_count > honto_best_correct    # ローカルテスタ用、本当の最適解
+            honto_best_correct = correct_count
+        end
+        # debug(measure_num, " ", correct_count, " ", ceil(Int, get_score_local(est, ans, placement_cost, measure_cost)))
+        # debug(lh_list[1:5])
+        if measure_num == 1
+            default_est = deepcopy(est)
+            default_lh_list = deepcopy(lh_list)
+            best_est = deepcopy(est)
+            best_lh_list = deepcopy(lh_list)
+        else
+            score = judge(best_lh_list, lh_list, placement_cost, measure_cost)
+            if score >= n ÷ 2
+                best_est = deepcopy(est)
+                best_lh_list = deepcopy(lh_list)
+                best_correct_count = correct_count
+                best_num = measure_num
+            end
+            score = judge(default_lh_list, lh_list, placement_cost, measure_cost)
+            if score >= n * 19 ÷ 20
+                best_est = deepcopy(est)
+                best_lh_list = deepcopy(lh_list)
+                best_correct_count = correct_count
+                # break
+            end
+            if score < n ÷ 5
+                break
+            end
+        end
+        isopen(timer) || break
+        measure_num > 95 && break
+    end
+
+    # debug(best_correct_count, " ", honto_best_correct)
+    # debug("measure_count:", best_num)
+    answer(best_est)
+    best_est, placement_cost, measure_cost
+end
+# ----------------------------
+
+function main()
+    l, n, s = int(inputs())
+    yx = [int(inputs()) for _ = 1:n]
+    est, placement_cost, measure_cost = solve(l, n, s, yx)
+    # debug(placement_cost, measure_cost)
+end
+
+function get_score_local(est, ans, placement_cost, measure_cost)
+    w = 0
+    for (e, a) = zip(est, ans)
+        if e != a
+            w += 1
+        end
+    end
+    10^14 * 0.8^w / (placement_cost + measure_cost + 10^5)
+end
+
+function _main()    # ローカルテスタ用
+    l, n, s = int(inputs())
+    yx = [int(inputs()) for _ = 1:n]
+    ans = [int(input()) for _ = 1:n]
+    @time est, placement_cost, measure_cost = solve(l, n, s, yx, ans)
+    myscore = ceil(Int, get_score_local(est, ans, placement_cost, measure_cost))
+    debug("score:$myscore placement_cost:$placement_cost measure_cost:$measure_cost")
+    myscore
+end
+
+function test()
+    score_sum = 0
+    for file = 0:99
+        filename = lpad(file, 4, "0")
+        mystdin = joinpath(abspath(@__DIR__), "in\\$filename.txt")
+        mystdout = joinpath(abspath(@__DIR__), "out\\$filename.txt")
+        redirect_stdio(stdin=mystdin, stdout=mystdout) do
+            score_sum += _main()
+        end
+    end
+    debug("score_sum:", Int(score_sum))
+end
+
+input() = readline()
+inputs() = split(readline())
+int(s::AbstractChar) = parse(Int, s)
+int(s::AbstractString) = parse(Int, s)
+int(v::AbstractArray) = map(x -> parse(Int, x), v)
+debug(x...) = println(stderr, x...)
+if abspath(PROGRAM_FILE) == @__FILE__
+    main()
+else
+    islocal = true
+    test()
+end
